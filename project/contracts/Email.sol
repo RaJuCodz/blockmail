@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;  // Set a compatible version
+pragma solidity ^0.8.0;
 
 contract Email {
     struct EmailData {
@@ -8,73 +8,153 @@ contract Email {
         string subject;
         string content;
         uint256 timestamp;
-        bool isSent;  // true for sent emails, false for received emails
+        bool isStarred;
+        bool isDeleted;
     }
 
-    mapping(address => EmailData[]) private userEmails;
+    struct UserProfile {
+        string name;
+        string avatar;
+        bool exists;
+    }
+
+    mapping(address => EmailData[]) public sentEmails;
+    mapping(address => EmailData[]) public receivedEmails;
+    mapping(address => UserProfile) public userProfiles;
+    mapping(address => mapping(uint256 => bool)) public starredEmails;
 
     event EmailSent(
         address indexed from,
         address indexed to,
         string subject,
+        string content,
         uint256 timestamp
     );
 
+    event EmailStarred(address indexed user, uint256 emailIndex);
+    event EmailUnstarred(address indexed user, uint256 emailIndex);
+    event ProfileUpdated(address indexed user, string name, string avatar);
+
     function sendEmail(
         address to,
-        string calldata subject,
-        string calldata content
-    ) external {
+        string memory subject,
+        string memory content
+    ) public {
         require(to != address(0), "Invalid recipient address");
-        require(userEmails[to].length < 100, "Recipient inbox full"); // Limit to prevent storage spam
-        require(userEmails[msg.sender].length < 100, "Sender outbox full");
+        require(bytes(subject).length > 0, "Subject cannot be empty");
+        require(bytes(content).length > 0, "Content cannot be empty");
 
-        // Store for recipient
-        userEmails[to].push(EmailData({
+        EmailData memory newEmail = EmailData({
             from: msg.sender,
             to: to,
             subject: subject,
             content: content,
             timestamp: block.timestamp,
-            isSent: false
-        }));
+            isStarred: false,
+            isDeleted: false
+        });
 
-        // Store for sender
-        userEmails[msg.sender].push(EmailData({
-            from: msg.sender,
-            to: to,
-            subject: subject,
-            content: content,
-            timestamp: block.timestamp,
-            isSent: true
-        }));
+        sentEmails[msg.sender].push(newEmail);
+        receivedEmails[to].push(newEmail);
 
-        emit EmailSent(msg.sender, to, subject, block.timestamp);
+        emit EmailSent(msg.sender, to, subject, content, block.timestamp);
     }
 
-    function getEmails(bool sentOnly) external view returns (EmailData[] memory) {
-        EmailData[] memory allEmails = userEmails[msg.sender];
+    function getSentEmails() public view returns (EmailData[] memory) {
+        return sentEmails[msg.sender];
+    }
+
+    function getReceivedEmails() public view returns (EmailData[] memory) {
+        return receivedEmails[msg.sender];
+    }
+
+    function getStarredEmails() public view returns (EmailData[] memory) {
+        EmailData[] memory allEmails = new EmailData[](sentEmails[msg.sender].length + receivedEmails[msg.sender].length);
         uint256 count = 0;
-        
-        // Count matching emails
-        for(uint i = 0; i < allEmails.length; i++) {
-            if(allEmails[i].isSent == sentOnly) {
+
+        // Add starred sent emails
+        for (uint256 i = 0; i < sentEmails[msg.sender].length; i++) {
+            if (starredEmails[msg.sender][i] && !sentEmails[msg.sender][i].isDeleted) {
+                allEmails[count] = sentEmails[msg.sender][i];
                 count++;
             }
         }
-        
-        // Create filtered array
-        EmailData[] memory filteredEmails = new EmailData[](count);
-        uint256 index = 0;
-        
-        // Fill filtered array
-        for(uint i = 0; i < allEmails.length; i++) {
-            if(allEmails[i].isSent == sentOnly) {
-                filteredEmails[index] = allEmails[i];
-                index++;
+
+        // Add starred received emails
+        for (uint256 i = 0; i < receivedEmails[msg.sender].length; i++) {
+            if (starredEmails[msg.sender][i + sentEmails[msg.sender].length] && !receivedEmails[msg.sender][i].isDeleted) {
+                allEmails[count] = receivedEmails[msg.sender][i];
+                count++;
             }
         }
-        
-        return filteredEmails;
+
+        // Resize array to actual count
+        EmailData[] memory result = new EmailData[](count);
+        for (uint256 i = 0; i < count; i++) {
+            result[i] = allEmails[i];
+        }
+        return result;
+    }
+
+    function starEmail(uint256 emailIndex, bool isSent) public {
+        require(
+            emailIndex < (isSent ? sentEmails[msg.sender].length : receivedEmails[msg.sender].length),
+            "Invalid email index"
+        );
+
+        uint256 globalIndex = isSent ? emailIndex : emailIndex + sentEmails[msg.sender].length;
+        starredEmails[msg.sender][globalIndex] = true;
+
+        if (isSent) {
+            sentEmails[msg.sender][emailIndex].isStarred = true;
+        } else {
+            receivedEmails[msg.sender][emailIndex].isStarred = true;
+        }
+
+        emit EmailStarred(msg.sender, globalIndex);
+    }
+
+    function unstarEmail(uint256 emailIndex, bool isSent) public {
+        require(
+            emailIndex < (isSent ? sentEmails[msg.sender].length : receivedEmails[msg.sender].length),
+            "Invalid email index"
+        );
+
+        uint256 globalIndex = isSent ? emailIndex : emailIndex + sentEmails[msg.sender].length;
+        starredEmails[msg.sender][globalIndex] = false;
+
+        if (isSent) {
+            sentEmails[msg.sender][emailIndex].isStarred = false;
+        } else {
+            receivedEmails[msg.sender][emailIndex].isStarred = false;
+        }
+
+        emit EmailUnstarred(msg.sender, globalIndex);
+    }
+
+    function deleteEmail(uint256 emailIndex, bool isSent) public {
+        require(
+            emailIndex < (isSent ? sentEmails[msg.sender].length : receivedEmails[msg.sender].length),
+            "Invalid email index"
+        );
+
+        if (isSent) {
+            sentEmails[msg.sender][emailIndex].isDeleted = true;
+        } else {
+            receivedEmails[msg.sender][emailIndex].isDeleted = true;
+        }
+    }
+
+    function updateProfile(string memory name, string memory avatar) public {
+        userProfiles[msg.sender] = UserProfile({
+            name: name,
+            avatar: avatar,
+            exists: true
+        });
+        emit ProfileUpdated(msg.sender, name, avatar);
+    }
+
+    function getProfile(address user) public view returns (UserProfile memory) {
+        return userProfiles[user];
     }
 }
